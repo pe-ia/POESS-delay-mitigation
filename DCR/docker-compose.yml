@@ -1,7 +1,7 @@
 services:
   microservice:
     build: ./microservice
-    container_name: microservice
+    container_name: p5-microservice
     ports:
       - "5001:5001"
     env_file:
@@ -11,16 +11,18 @@ services:
 
   siddhi:
     build: ./siddhi
-    container_name: siddhi-runtime
+    container_name: p5-siddhi
     ports:
-      - "7071:7071"
-      - "7072:7072"
-      - "7073:7073"
-      - "9390:9390"   # optional dashboard
+      - "7071:7071"   # delay readings in
+      - "7072:7072"   # callbacks from the microservice
+      - "7073:7073"   # actions by people in
+      - "7074:7074"   # board entries in
+      - "7075:7075"   # route stops in
+      - "7076:7076"   # trips that ended in
 
   logging-service:
     build: ./logging_service
-    container_name: logging-service
+    container_name: p5-logging
     ports:
       - "5010:5010"
     volumes:
