@@ -3,19 +3,19 @@
 SERVICE="$1"
 
 # Allowed services
-VALID_SERVICES=("siddhi" "microservice" "logging")
+VALID_SERVICES=("siddhi" "microservice" "logging-service")
 
 # Check if argument is provided
 if [ -z "$SERVICE" ]; then
     echo "❌ No service specified."
-    echo "Usage: ./rebuild.sh <siddhi|microservice|logging>"
+    echo "Usage: ./rebuild.sh <siddhi|microservice|logging-service>"
     exit 1
 fi
 
 # Check if argument is valid
 if [[ ! " ${VALID_SERVICES[@]} " =~ " ${SERVICE} " ]]; then
     echo "❌ Invalid service: $SERVICE"
-    echo "Valid options: siddhi, microservice, logging"
+    echo "Valid options: siddhi, microservice, logging-service"
     exit 1
 fi
 
