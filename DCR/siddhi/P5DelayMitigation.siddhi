@@ -1,0 +1,448 @@
+@App:name("P5DelayMitigation")
+
+/* -----------------------------
+   INPUT STREAMS
+   ----------------------------- */
+
+/* One board entry, sent when it is first seen or its delay changes.
+   kind is "tpg" (bus / tram) or "train". Times are epoch milliseconds.
+   track = true means the entry also counts as a delay reading for the trip. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7074/departure",
+    @map(type='json')
+)
+define stream DepartureStream(
+    stop_id string,
+    kind string,
+    line string,
+    dest string,
+    trip_id string,
+    sched_dep long,
+    delay int,
+    track bool,
+    timestamp string
+);
+
+/* One stop a TPG trip still has to serve, with its scheduled arrival there. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7075/route",
+    @map(type='json')
+)
+define stream RouteStream(trip_id string, stop_id string, sched_arr long, timestamp string);
+
+/* A TPG trip is no longer on any monitored board: it has ended or left the area. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7076/trip_ended",
+    @map(type='json')
+)
+define stream TripEndedStream(trip_id string, timestamp string);
+
+/* A delay reading sent by hand, for tests. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7071/delay",
+    @map(type='json')
+)
+define stream ManualDelayStream(trip_id string, delay int, timestamp string);
+
+/* Any other P5 event for a trip: a dispatcher, driver or SBB / LEX action.
+   event_id is the event's id on dcrgraphs.net. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7073/action",
+    @map(type='json')
+)
+define stream ActionStream(trip_id string, event_id string, value string, role string, timestamp string);
+
+/* Callback from the microservice after every event it ran in the DCR engine. */
+@source(
+    type='http',
+    receiver.url="http://0.0.0.0:7072/middleman",
+    @map(type='json')
+)
+define stream MiddlemanStream(
+    trip_id string,
+    case_id string,
+    event string,
+    label string,
+    variable string,
+    var_type string,
+    value string,
+    timestamp string,
+    role string,
+    payload string,
+    error string
+);
+
+
+/* -----------------------------
+   TABLES
+   ----------------------------- */
+
+/* Latest known state of every departure at the monitored stops. */
+@primaryKey('stop_id', 'trip_id')
+define table Departures(stop_id string, kind string, line string, dest string, trip_id string, sched_dep long, delay int);
+
+/* Remaining monitored stops of each TPG trip. */
+@primaryKey('trip_id', 'stop_id')
+define table Routes(trip_id string, stop_id string, sched_arr long);
+
+/* Last delay reading per trip. */
+@primaryKey('trip_id')
+define table TripInfo(trip_id string, line string, delay int);
+
+/* Open cases. case_id is "PENDING" between asking for a case and getting its id. */
+@primaryKey('trip_id')
+define table Cases(trip_id string, case_id string);
+
+/* Cases where the hold rule advises a hold, with the longest hold it allows in minutes. */
+@primaryKey('case_id')
+define table HoldAdvised(case_id string, max_hold long);
+
+/* The delay each case had when its connections were last checked. */
+@primaryKey('case_id')
+define table LastCheck(case_id string, delay int);
+
+
+/* -----------------------------
+   OUTPUT STREAMS
+   ----------------------------- */
+
+@sink(type='http',
+      on.error='WAIT',
+      publisher.url='http://microservice:5001/start_case',
+      method='POST',
+      @map(type='json'))
+define stream StartCaseOut(trip_id string, band string, timestamp string);
+
+@sink(type='http',
+      on.error='WAIT',
+      publisher.url='http://microservice:5001/execute',
+      method='POST',
+      @map(type='json'))
+define stream ExecuteOut(trip_id string, case_id string, event_id string, value string, role string, timestamp string);
+
+@sink(type='http',
+      on.error='WAIT',
+      publisher.url='http://logging-service:5010/log',
+      method='POST',
+      @map(type='json'))
+define stream Logging(
+    trip_id string,
+    case_id string,
+    event string,
+    label string,
+    variable string,
+    var_type string,
+    value string,
+    timestamp string,
+    role string,
+    payload string,
+    error string
+);
+
+define stream DelayStream(trip_id string, line string, delay int, timestamp string);
+
+
+/* -----------------------------
+   KEEP THE BOARDS AND ROUTES
+   ----------------------------- */
+
+from DepartureStream
+select stop_id, kind, line, dest, trip_id, sched_dep, delay
+update or insert into Departures
+    on Departures.stop_id == stop_id and Departures.trip_id == trip_id;
+
+from RouteStream
+select trip_id, stop_id, sched_arr
+update or insert into Routes
+    on Routes.trip_id == trip_id and Routes.stop_id == stop_id;
+
+
+/* -----------------------------
+   DELAY READINGS: OPEN A CASE OR UPDATE ONE
+   ----------------------------- */
+
+from DepartureStream[kind == "tpg" and track]
+select trip_id, line, delay, timestamp
+insert into DelayStream;
+
+from ManualDelayStream
+select trip_id, "" as line, delay, timestamp
+insert into DelayStream;
+
+/* Compare with the last reading, then remember this one. */
+from DelayStream as D
+left outer join TripInfo as I
+    on D.trip_id == I.trip_id
+select D.trip_id, D.line, D.delay, D.timestamp, I.delay as last_delay
+insert into DelayReading;
+
+from DelayStream
+select trip_id, line, delay
+update or insert into TripInfo
+    on TripInfo.trip_id == trip_id;
+
+/* Only a changed delay goes on. */
+from DelayReading[last_delay is null or last_delay != delay] as D
+left outer join Cases as C
+    on D.trip_id == C.trip_id
+select D.trip_id, D.delay, D.timestamp, C.case_id
+insert into DelayAttempt;
+
+/* P4 is not implemented, so this stands in for its handover. P4's decision
+   table sorts a delay into minor, significant or severe. A minor delay stays
+   with P4, which keeps watching. A significant or severe one starts P5, also
+   when a minor delay grows into one. The two limits (5 and 10 minutes) are
+   the ones in P4's decision table. */
+from DelayAttempt[case_id is null and delay >= 5]
+select trip_id, "PENDING" as case_id
+insert into Cases;
+
+from DelayAttempt[case_id is null and delay >= 5]
+select trip_id, ifThenElse(delay >= 10, "severe", "significant") as band, timestamp
+insert into StartCaseOut;
+
+/* A case is open: "Delay update (stop.delay)". */
+from DelayAttempt[not(case_id is null) and case_id != "PENDING"]
+select trip_id, case_id, "delay" as event_id, convert(delay, "string") as value, "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+
+/* -----------------------------
+   CASE STARTED: READ THE ROUTE, THEN CHECK THE CONNECTIONS
+   ----------------------------- */
+
+from MiddlemanStream[event == "band" and error == ""]
+select trip_id, case_id
+update or insert into Cases
+    set Cases.case_id = case_id
+    on Cases.trip_id == trip_id;
+
+from MiddlemanStream[event == "band" and error != ""]
+delete Cases
+    on Cases.trip_id == trip_id;
+
+/* "Read remaining route of the trip (passList)". */
+from MiddlemanStream[event == "band" and error == ""]
+select trip_id, case_id, "Event_ROUTE" as event_id, "" as value, "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+from MiddlemanStream[event == "Event_ROUTE" and error == ""] as M
+join TripInfo as I
+    on M.trip_id == I.trip_id
+select M.trip_id, M.case_id, M.timestamp, I.line, I.delay
+insert into CheckTrigger;
+
+/* The delay got 3 or more minutes worse since the last check: check again. */
+from MiddlemanStream[event == "delay" and error == ""] as M
+join LastCheck as L
+    on M.case_id == L.case_id
+select M.trip_id, M.case_id, M.timestamp, convert(M.value, "int") as delay, L.delay as checked_delay
+insert into DelayAfterCheck;
+
+from DelayAfterCheck[delay >= checked_delay + 3] as M
+join TripInfo as I
+    on M.trip_id == I.trip_id
+select M.trip_id, M.case_id, M.timestamp, I.line, M.delay
+insert into CheckTrigger;
+
+/* Each check starts clean. */
+from CheckTrigger
+select case_id, delay
+update or insert into LastCheck
+    on LastCheck.case_id == case_id;
+
+from CheckTrigger
+delete HoldAdvised
+    on HoldAdvised.case_id == case_id;
+
+/* A connection counts as planned when it leaves 2 to 10 minutes after the
+   trip's scheduled arrival. The trip misses it when, with its delay and 2
+   minutes to change, it gets there after the connection's expected departure. */
+
+/* Trains. The trip must serve gare Cornavin (8587057), the trains
+           leave from Genève (8501008). */
+
+from CheckTrigger as T
+left outer join Routes as R
+    on R.trip_id == T.trip_id and R.stop_id == "8587057"
+select T.trip_id, T.case_id, T.timestamp, T.delay, R.sched_arr
+insert into RailRoute;
+
+from RailRoute[sched_arr is null]
+select trip_id, case_id, "railAtRisk" as event_id, "false" as value, "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+from RailRoute[not(sched_arr is null)] as T
+left outer join Departures as P
+    on P.stop_id == "8501008"
+       and P.sched_dep >= T.sched_arr + 120000L
+       and P.sched_dep <= T.sched_arr + 600000L
+       and P.sched_dep + P.delay * 60000L < T.sched_arr + T.delay * 60000L + 120000L
+select T.trip_id, T.case_id, T.timestamp, P.trip_id as conn
+insert into RailMatches;
+
+from RailMatches#window.batch()
+select trip_id, case_id, timestamp, sum(ifThenElse(conn is null, 0, 1)) as n
+group by case_id
+insert into RailResult;
+
+/* "Check SBB / Léman Express trains at all rail stations on route". */
+from RailResult
+select trip_id, case_id, "railAtRisk" as event_id, ifThenElse(n > 0, "true", "false") as value,
+       "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+/* TPG lines at every monitored stop the trip still serves.
+           A missed TPG connection is at risk when
+             - it could be saved by a hold of 5 minutes or less (wait <= 5), and
+             - its line runs every 15 minutes or less often: no other departure
+               of that line in that direction within 15 minutes of it.
+           wait = minutes the connection would have to wait for the late trip. */
+
+from CheckTrigger as T
+left outer join Routes as R
+    on R.trip_id == T.trip_id
+select T.trip_id, T.case_id, T.timestamp, T.line, T.delay, R.stop_id, R.sched_arr
+insert into TpgRoute;
+
+from TpgRoute[stop_id is null]
+select trip_id, case_id, "tpgAtRisk" as event_id, "false" as value, "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+/* the planned connections the trip would miss ("none" when there is none at a stop) */
+from TpgRoute[not(stop_id is null)] as T
+left outer join Departures as P
+    on P.kind == "tpg"
+       and P.stop_id == T.stop_id
+       and P.line != T.line
+       and P.sched_dep >= T.sched_arr + 120000L
+       and P.sched_dep <= T.sched_arr + 600000L
+       and P.sched_dep + P.delay * 60000L < T.sched_arr + T.delay * 60000L + 120000L
+select T.trip_id, T.case_id, T.timestamp,
+       ifThenElse(P.trip_id is null, "none", P.trip_id) as conn,
+       P.stop_id as conn_stop, P.line as conn_line, P.dest as conn_dest, P.sched_dep as conn_dep,
+       (T.sched_arr + T.delay * 60000L + 120000L - P.sched_dep - P.delay * 60000L + 59999L) / 60000L as wait
+insert into TpgMissed;
+
+/* near = another departure of the same line and direction within 15 minutes */
+from TpgMissed as M
+left outer join Departures as N
+    on N.stop_id == M.conn_stop and N.line == M.conn_line and N.dest == M.conn_dest
+       and N.sched_dep != M.conn_dep
+       and N.sched_dep > M.conn_dep - 900000L and N.sched_dep < M.conn_dep + 900000L
+select M.trip_id, M.case_id, M.timestamp, M.conn, M.conn_stop, M.conn_line, M.conn_dest, M.conn_dep, M.wait,
+       N.trip_id as near
+insert into TpgChecked;
+
+from TpgChecked#window.batch()
+select trip_id, case_id, timestamp,
+       sum(ifThenElse(conn != "none" and near is null and wait <= 5L, 1, 0)) as n
+group by case_id
+insert into TpgResult;
+
+/* "Check connections to TPG lines at transfer stops". */
+from TpgResult
+select trip_id, case_id, "tpgAtRisk" as event_id, ifThenElse(n > 0, "true", "false") as value,
+       "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+/* The hold rule, for each connection at risk (table: P5_hold_rule.dmn).
+           1. wait <= 2                    -> hold
+           2. wait <= 4 and headway >= 20  -> hold
+           3. otherwise                    -> no hold
+           headway >= 20 means: no other departure of that line in that
+           direction within 20 minutes. */
+
+from TpgChecked[conn != "none" and near is null and wait <= 2L]
+select case_id, wait as max_hold
+update or insert into HoldAdvised
+    on HoldAdvised.case_id == case_id;
+
+from TpgChecked[conn != "none" and near is null and wait > 2L and wait <= 4L] as M
+left outer join Departures as N
+    on N.stop_id == M.conn_stop and N.line == M.conn_line and N.dest == M.conn_dest
+       and N.sched_dep != M.conn_dep
+       and N.sched_dep > M.conn_dep - 1200000L and N.sched_dep < M.conn_dep + 1200000L
+select M.case_id, M.wait, N.trip_id as near20
+insert into HoldRule2;
+
+from HoldRule2[near20 is null]
+select case_id, wait as max_hold
+update or insert into HoldAdvised
+    on HoldAdvised.case_id == case_id;
+
+/* "Evaluate TPG hold rule": a hold is advised when the table says hold for
+   at least one connection at risk. */
+from MiddlemanStream[event == "tpgAtRisk" and value == "true" and error == ""] as M
+left outer join HoldAdvised as H
+    on M.case_id == H.case_id
+select M.trip_id, M.case_id, "holdAdvised" as event_id, ifThenElse(H.case_id is null, "false", "true") as value,
+       "Event processing" as role, M.timestamp
+insert into ExecuteOut;
+
+
+/* -----------------------------
+   EVERY MITIGATION ACTION IS RECORDED
+   ----------------------------- */
+
+/* "Send action record to event processing", after each event in "Mitigation actions". */
+from MiddlemanStream[error == "" and (event == "Event_INF" or event == "Event_REPL" or event == "Event_RIS"
+        or event == "requestHold" or event == "holdAccepted" or event == "Event_REL" or event == "Event_INFC"
+        or event == "holdApproved" or event == "Event_HOLDT" or event == "Event_RELT")]
+select trip_id, case_id, "Event_LOG" as event_id, "" as value, "Event processing" as role, timestamp
+insert into ExecuteOut;
+
+
+/* -----------------------------
+   ACTIONS BY PEOPLE
+   ----------------------------- */
+
+from ActionStream as A
+left outer join Cases as C
+    on A.trip_id == C.trip_id
+select A.trip_id, A.event_id, A.value, A.role, A.timestamp, C.case_id
+insert into ActionAttempt;
+
+from ActionAttempt[not(case_id is null) and case_id != "PENDING"]
+select trip_id, case_id, event_id, value, role, timestamp
+insert into ExecuteOut;
+
+from ActionAttempt[case_id is null or case_id == "PENDING"]
+select trip_id, "" as case_id, event_id as event, event_id as label, "" as variable, "" as var_type,
+       value, timestamp, role, "" as payload, "no open case for this trip" as error
+insert into Logging;
+
+
+/* -----------------------------
+   THE TRIP HAS ENDED
+   ----------------------------- */
+
+/* "Trip ended": nothing more can be done for this trip, the case may close. */
+from TripEndedStream as E
+join Cases as C
+    on E.trip_id == C.trip_id
+select E.trip_id, C.case_id, "Event_END" as event_id, "" as value, "Event processing" as role, E.timestamp
+insert into TripEndedAttempt;
+
+from TripEndedAttempt[case_id != "PENDING"]
+select trip_id, case_id, event_id, value, role, timestamp
+insert into ExecuteOut;
+
+
+/* -----------------------------
+   CLOSE AND LOG
+   ----------------------------- */
+
+/* "Close mitigation, start P6" ran: the case is over. */
+from MiddlemanStream[event == "Event_CLOSE" and error == ""]
+delete Cases
+    on Cases.trip_id == trip_id;
+
+from MiddlemanStream
+select trip_id, case_id, event, label, variable, var_type, value, timestamp, role, payload, error
+insert into Logging;
