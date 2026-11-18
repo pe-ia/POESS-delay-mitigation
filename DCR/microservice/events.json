@@ -1,0 +1,122 @@
+{
+ "band": {
+  "label": "Receive delay case from P4",
+  "role": "Event processing",
+  "variable": "band",
+  "type": "string"
+ },
+ "Event_ASSESS": {
+  "label": "Assess situation",
+  "role": "Dispatcher",
+  "variable": null,
+  "type": null
+ },
+ "Event_LOG": {
+  "label": "Send action record to event processing",
+  "role": "Event processing",
+  "variable": null,
+  "type": null
+ },
+ "Event_ROUTE": {
+  "label": "Read remaining route of the trip (passList)",
+  "role": "Event processing",
+  "variable": null,
+  "type": null
+ },
+ "railAtRisk": {
+  "label": "Check SBB / Léman Express trains at all rail stations on route",
+  "role": "Event processing",
+  "variable": "railAtRisk",
+  "type": "bool"
+ },
+ "tpgAtRisk": {
+  "label": "Check connections to TPG lines at transfer stops",
+  "role": "Event processing",
+  "variable": "tpgAtRisk",
+  "type": "bool"
+ },
+ "holdAdvised": {
+  "label": "Evaluate TPG hold rule",
+  "role": "Event processing",
+  "variable": "holdAdvised",
+  "type": "bool"
+ },
+ "delay": {
+  "label": "Delay update (stop.delay)",
+  "role": "Event processing",
+  "variable": "delay",
+  "type": "int"
+ },
+ "Event_INF": {
+  "label": "Inform passengers",
+  "role": "Dispatcher",
+  "variable": null,
+  "type": null
+ },
+ "Event_REPL": {
+  "label": "Dispatch replacement bus",
+  "role": "Dispatcher",
+  "variable": null,
+  "type": null
+ },
+ "Event_RIS": {
+  "label": "Replacement bus in service",
+  "role": "Driver",
+  "variable": null,
+  "type": null
+ },
+ "requestHold": {
+  "label": "Decide whether to ask SBB / LEX to hold train",
+  "role": "Dispatcher",
+  "variable": "requestHold",
+  "type": "bool"
+ },
+ "holdAccepted": {
+  "label": "Reply to hold request",
+  "role": "SBB / LEX",
+  "variable": "holdAccepted",
+  "type": "bool"
+ },
+ "Event_REL": {
+  "label": "Release held train",
+  "role": "SBB / LEX",
+  "variable": null,
+  "type": null
+ },
+ "Event_INFC": {
+  "label": "Inform passengers: connection will be missed",
+  "role": "Dispatcher",
+  "variable": null,
+  "type": null
+ },
+ "holdApproved": {
+  "label": "Decide whether to hold TPG connection",
+  "role": "Dispatcher",
+  "variable": "holdApproved",
+  "type": "bool"
+ },
+ "Event_HOLDT": {
+  "label": "Hold connecting TPG bus / tram",
+  "role": "Driver",
+  "variable": null,
+  "type": null
+ },
+ "Event_RELT": {
+  "label": "Release held TPG vehicle",
+  "role": "Driver",
+  "variable": null,
+  "type": null
+ },
+ "Event_END": {
+  "label": "Trip ended",
+  "role": "Event processing",
+  "variable": null,
+  "type": null
+ },
+ "Event_CLOSE": {
+  "label": "Close mitigation, start P6",
+  "role": "Dispatcher",
+  "variable": null,
+  "type": null
+ }
+}
