@@ -184,6 +184,14 @@ We kept its design and rewrote its contents for P5. The changes were made with t
 
 - Makes `events.json` from the model file `P5_delay_mitigation_timed.xml`.
 
+`DMN/check_dmn.py` (new)
+
+- Tests a DMN decision table in Camunda Zeebe 8.8.0, the engine the BPMN example runs: `python3 DMN/check_dmn.py <dmn> <cases csv> <log>`.
+- Starts the engine in one container, deploys the table, evaluates every case in the csv (the first row names the inputs, every other row is one case) and removes the container again.
+- Writes every request and the engine's answer to the log.
+- We tested the hold rule table `P5_hold_rule.dmn` with it.
+
 ### Not in this repo
 
 - The DCR graphs themselves. We modelled them in Process DoCtoR, and the engine's copy on dcrgraphs.net was rebuilt there by hand.
+- The hold rule table `P5_hold_rule.dmn` and its cases file. `DMN/check_dmn.py` takes their paths as arguments.
